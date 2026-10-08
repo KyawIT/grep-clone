@@ -112,22 +112,71 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Config, Str
 }
 
 /// Return `(1-based line number, line)` for each selected line.
-pub fn search<'a>(_text: &'a str, _cfg: &Config) -> Vec<(usize, &'a str)> {
-    todo!()
+pub fn search<'a>(text: &'a str, cfg: &Config) -> Vec<(usize, &'a str)> {
+    let pat = if cfg.ignore_case { cfg.pattern.to_lowercase() } else { cfg.pattern.clone() };
+    // split_terminator: "a\n" is one line, "" is none, and '\r' stays part of the line (like GNU grep).
+    text.split_terminator('\n')
+        .enumerate()
+        .filter(|(_, line)| {
+            let hit = if cfg.ignore_case { line.to_lowercase().contains(&pat) } else { line.contains(&pat) };
+            hit != cfg.invert
+        })
+        .map(|(i, line)| (i + 1, line))
+        .collect()
 }
 
 /// Format one output line: optional `path:` prefix, optional `N:` prefix, then the line.
-pub fn format_match(_path: Option<&str>, _line_no: usize, _line: &str, _cfg: &Config) -> String {
-    todo!()
+pub fn format_match(path: Option<&str>, line_no: usize, line: &str, cfg: &Config) -> String {
+    let p = path.map(|p| format!("{p}:")).unwrap_or_default();
+    let n = if cfg.line_numbers { format!("{line_no}:") } else { String::new() };
+    format!("{p}{n}{line}")
 }
 
-/// Search every path in `cfg` like GNU grep, returning the exit code:
-/// 0 = something selected, 1 = nothing selected, 2 = an error happened (even if something matched).
-/// - No paths, or the path `-`, means read `stdin` (shown as `(standard input)` in prefixes).
-/// - Matches go to `out`; errors and "binary file matches" notices go to `err`, prefixed `grep_clone: `.
-/// - A file that can't be read is reported to `err` and skipped; the other files are still searched.
-pub fn run(_cfg: &Config, _stdin: &mut impl Read, _out: &mut impl Write, _err: &mut impl Write) -> i32 {
-    todo!()
+pub fn run(cfg: &Config, stdin: &mut impl Read, out: &mut impl Write, err: &mut impl Write) -> i32 {
+    let dash = ["-".to_string()];
+    let paths: &[String] = if cfg.paths.is_empty() { &dash } else { &cfg.paths };
+    let multi = paths.len() > 1;
+    let (mut selected, mut failed) = (false, false);
+
+    for path in paths {
+        let is_stdin = path == "-";
+        let name = if is_stdin { "(standard input)" } else { path.as_str() };
+
+        let mut bytes = Vec::new();
+        let read = if is_stdin {
+            stdin.read_to_end(&mut bytes).map(|_| ())
+        } else {
+            std::fs::read(path).map(|b| bytes = b)
+        };
+        if let Err(e) = read {
+            let _ = writeln!(err, "grep_clone: {name}: {e}");
+            failed = true;
+            continue;
+        }
+
+        // Binary = NUL byte or invalid UTF-8; still searched (lossily), but lines are never printed.
+        let binary = bytes.contains(&0) || std::str::from_utf8(&bytes).is_err();
+        let text = String::from_utf8_lossy(&bytes);
+        let hits = search(&text, cfg);
+        selected |= !hits.is_empty();
+        let shown = multi.then_some(name);
+
+        // ponytail: write errors (e.g. closed pipe) are ignored; propagate if exit code must reflect them.
+        if cfg.count {
+            let prefix = shown.map(|n| format!("{n}:")).unwrap_or_default();
+            let _ = writeln!(out, "{prefix}{}", hits.len());
+        } else if binary {
+            if !hits.is_empty() {
+                let _ = writeln!(err, "grep_clone: {name}: binary file matches");
+            }
+        } else {
+            for (n, line) in hits {
+                let _ = writeln!(out, "{}", format_match(shown, n, line, cfg));
+            }
+        }
+    }
+
+    if failed { 2 } else if selected { 0 } else { 1 }
 }
 
 fn main() {
