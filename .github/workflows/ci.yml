@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Edition 2024 needs Rust 1.85+; update to the latest stable to be safe.
+      - run: rustup update stable
+      - run: cargo test --locked
